@@ -1,1 +1,0 @@
-andor(thresh(1,andor(l:0,1,l:1)),thresh(1,andor(l:1,1,l:1)),thresh(1,andor(l:1,1,l:1))
