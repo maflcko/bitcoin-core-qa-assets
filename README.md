@@ -27,7 +27,7 @@ runner:
 
 To avoid corpora bloat, stale inputs and potential CI timeouts, we usually
 prune/minimize our corpora around the branch-off point using the
-[`delete_nonreduced_fuzz_inputs.sh`](https://raw.githubusercontent.com/bitcoin-core/bitcoin-maintainer-tools/main/delete_nonreduced_fuzz_inputs.sh)
+[`delete-nonreduced-fuzz-inputs`](https://github.com/bitcoin-core/qa-assets/tree/main/delete-nonreduced-fuzz-inputs)
 script (Recommended to run in a fresh VM, see documentation in the script). The
 script is usually run twice to ensure that the results are "somewhat"
 reproducible (e.g.
