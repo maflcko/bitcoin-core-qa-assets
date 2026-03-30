@@ -64,22 +64,20 @@ Usage: delete-nonreduced-fuzz-inputs
 }
 
 fn app() -> AppResult {
-    let mut args = env::args().skip(1);
-    match args.next() {
-        None => {}
-        Some(a) if a == "--help" || a == "-h" => {
-            if args.next().is_some() {
-                Err(help("Too many arguments"))?;
-            }
-            Err(help("help requested"))?;
+    for arg in env::args().skip(1) {
+        match arg.as_str() {
+            "--help" | "-h" => return Err(help("help requested")),
+            a => return Err(help(&format!("Unexpected argument: {a}"))),
         }
-        Some(a) => Err(help(&format!("Unexpected argument: {a}")))?,
     }
+
     install_deps()?;
     clone_and_configure_repositories()?;
 
     let all_inputs_dir = move_fuzz_inputs()?;
-    git_commit_all(QA_ASSETS_PATH, "Delete fuzz inputs")?;
+    // git commit -a does not add untracked removed files
+    git_add(QA_ASSETS_PATH, FUZZ_CORPORA_DIR)?;
+    git_commit(QA_ASSETS_PATH, "Delete fuzz inputs")?;
 
     let fuzz_corpora_dir_path = Path::new(QA_ASSETS_PATH).join(FUZZ_CORPORA_DIR);
 
@@ -95,16 +93,15 @@ fn app() -> AppResult {
         let output_dir = fuzz_corpora_dir_path.join(fuzz_target);
         run_afl_cmin(fuzz_target, input_dir, output_dir)?;
     }
-    // git commit -a does not add untracked files so we add fuzz_corpora manually
     git_add(QA_ASSETS_PATH, FUZZ_CORPORA_DIR)?;
-    git_commit_all(QA_ASSETS_PATH, "Reduced inputs for afl-cmin")?;
+    git_commit(QA_ASSETS_PATH, "Reduced inputs for afl-cmin")?;
 
     for sanitizer in SANITIZERS {
         println!("Adding reduced seeds for sanitizer={sanitizer}");
         build_bitcoin_with_sanitizer(sanitizer)?;
         run_libfuzzer(&all_inputs_dir, &fuzz_corpora_dir_path)?;
         git_add(QA_ASSETS_PATH, FUZZ_CORPORA_DIR)?;
-        git_commit_all(QA_ASSETS_PATH, &format!("Reduced inputs for {sanitizer}"))?;
+        git_commit(QA_ASSETS_PATH, &format!("Reduced inputs for {sanitizer}"))?;
     }
 
     println!("✨ Saved minimized fuzz corpora. ✨");
@@ -114,7 +111,8 @@ fn app() -> AppResult {
 fn install_deps() -> AppResult {
     install_apt_deps()?;
     install_llvm()?;
-    install_aflpp()
+    install_aflpp()?;
+    Ok(())
 }
 
 fn install_apt_deps() -> AppResult {
@@ -129,10 +127,9 @@ fn install_apt_deps() -> AppResult {
         Err("apt update failed".to_string())?;
     }
 
-    let mut install_args: Vec<&str> = vec!["install", "-y"];
-    install_args.extend_from_slice(APT_PACKAGES);
     if !Command::new("apt")
-        .args(&install_args)
+        .args(["install", "-y"])
+        .args(APT_PACKAGES)
         .status()
         .map_err(|e| format!("failed to spawn apt: {e}"))?
         .success()
@@ -146,13 +143,18 @@ fn install_apt_deps() -> AppResult {
 fn install_llvm() -> AppResult {
     env::set_var("LLVM_VERSION", LLVM_VERSION);
 
-    if !Command::new("wget")
-        .arg("https://apt.llvm.org/llvm.sh")
+    if !Command::new("curl")
+        .args([
+            "--fail",
+            "--location",
+            "--remote-name",
+            "https://apt.llvm.org/llvm.sh",
+        ])
         .status()
-        .map_err(|e| format!("failed to spawn wget: {e}"))?
+        .map_err(|e| format!("failed to spawn curl: {e}"))?
         .success()
     {
-        Err("wget failed".to_string())?;
+        Err("curl failed".to_string())?;
     }
 
     if !Command::new("bash")
@@ -183,7 +185,7 @@ fn install_aflpp() -> AppResult {
     let clone_path = "AFLplusplus";
     git_clone(
         "https://github.com/AFLplusplus/AFLplusplus",
-        &["--branch=stable"],
+        &["--branch=stable", "--depth=1"],
         clone_path,
     )?;
     if !Command::new("make")
@@ -251,7 +253,7 @@ fn git_clone<P: AsRef<Path>>(url: &str, clone_args: &[&str], clone_path: P) -> A
         .map_err(|e| format!("failed to spawn git clone: {e}"))?
         .success()
     {
-        return Err("git clone {url} failed".to_string());
+        return Err(format!("git clone {url} failed"));
     }
 
     Ok(())
@@ -286,10 +288,10 @@ fn git_add<P: AsRef<Path>, Q: AsRef<Path>>(repo_path: P, file_path: Q) -> AppRes
     Ok(())
 }
 
-fn git_commit_all<P: AsRef<Path>>(repo_path: P, message: &str) -> AppResult {
+fn git_commit<P: AsRef<Path>>(repo_path: P, message: &str) -> AppResult {
     if !Command::new("git")
         .current_dir(repo_path)
-        .args(["commit", "-a", "-m", message])
+        .args(["commit", "-m", message])
         .status()
         .map_err(|e| format!("failed to spawn git commit: {e}"))?
         .success()
