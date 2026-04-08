@@ -76,3 +76,28 @@ jobs:
 
       - name: Save caches
         uses: bitcoin/bitcoin/.github/actions/save-caches@master
+
+  lint:
+    name: lint
+    runs-on: ubuntu-slim
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+
+      - name: Install Cargo
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cargo
+
+      - name: Build touched-files-check
+        working-directory: contrib/touched-files-check
+        run: cargo build
+
+      - name: Fuzz inputs size
+        run: du -sh ./fuzz_corpora/
+
+      - name: Lint
+        run: ./contrib/touched-files-check/target/debug/touched-files-check "HEAD~..HEAD"
