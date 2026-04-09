@@ -18,6 +18,9 @@ submitting a pull request. You can use the libFuzzer option `-set_cover_merge=1`
 runner:
 [`test_runner.py`](https://github.com/bitcoin/bitcoin/blob/master/test/fuzz/test_runner.py).
 
+Make sure to first fetch the latest commit from the remote, to ensure no
+redundant inputs are added.
+
 ### Pruning inputs 
 
 * Over time fuzz engines reduce inputs (produce a smaller input that yields the

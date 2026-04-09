@@ -80,12 +80,23 @@ jobs:
   lint:
     name: lint
     runs-on: ubuntu-slim
+    if: github.event_name == 'pull_request'
 
     steps:
+      - name: Calculate fetch depth
+        id: vars
+        run: echo "PR_DEPTH=$(( ${{ github.event.pull_request.commits }} + 1 ))" >> $GITHUB_OUTPUT
+
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          fetch-depth: 2
+          fetch-depth: ${{ steps.vars.outputs.PR_DEPTH }}
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Ensure pull is rebased on current main
+        run: |
+          git fetch origin main --depth=1
+          git merge-base --is-ancestor origin/main ${{ github.event.pull_request.head.sha }}
 
       - name: Install Cargo
         run: |
@@ -96,8 +107,13 @@ jobs:
         working-directory: contrib/touched-files-check
         run: cargo build
 
-      - name: Fuzz inputs size
+      - name: Fuzz inputs size (git HEAD)
         run: du -sh ./fuzz_corpora/
 
       - name: Lint
-        run: ./contrib/touched-files-check/target/debug/touched-files-check "HEAD~..HEAD"
+        run: ./contrib/touched-files-check/target/debug/touched-files-check "origin/main..HEAD"
+
+      - name: Fuzz inputs size (git origin/main)
+        run: |
+          git checkout origin/main
+          du -sh ./fuzz_corpora/
