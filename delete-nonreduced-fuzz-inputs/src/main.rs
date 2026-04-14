@@ -58,18 +58,35 @@ fn help(err: &str) -> AppError {
         r#"
 Error: {err}
 
-Usage: delete-nonreduced-fuzz-inputs
+Usage: delete-nonreduced-fuzz-inputs [--extra-ref=<ref>]...
+
+Note: <ref> must be a tag or branch
 "#
     )
 }
 
-fn app() -> AppResult {
+fn parse_cli_args() -> Result<Vec<String>, AppError> {
+    let mut git_refs = Vec::new();
     for arg in env::args().skip(1) {
-        match arg.as_str() {
-            "--help" | "-h" => return Err(help("help requested")),
-            a => return Err(help(&format!("Unexpected argument: {a}"))),
+        if arg == "-h" || arg == "--help" {
+            Err(help("Help requested"))?;
+        } else if let Some(value) = arg.strip_prefix("--extra-ref=") {
+            if value.is_empty() {
+                return Err(help("empty value for --extra-ref"));
+            }
+            git_ls_remote("https://github.com/bitcoin/bitcoin", &value)?;
+            git_refs.push(value.to_string());
+        } else {
+            Err(help(&format!("Too many args, or unknown named arg: {arg}")))?;
         }
     }
+    Ok(git_refs)
+}
+
+fn app() -> AppResult {
+    let mut git_refs = vec!["master".to_string()];
+    let extra_refs = parse_cli_args()?;
+    git_refs.extend(extra_refs);
 
     install_deps()?;
     clone_and_configure_repositories()?;
@@ -81,27 +98,40 @@ fn app() -> AppResult {
 
     let fuzz_corpora_dir_path = Path::new(QA_ASSETS_PATH).join(FUZZ_CORPORA_DIR);
 
-    println!("Adding reduced seeds with afl-cmin");
-    build_bitcoin_afl()?;
-    let fuzz_targets = get_fuzz_targets()?;
-    for fuzz_target in &fuzz_targets {
-        let input_dir = all_inputs_dir.join(fuzz_target);
-        if !input_dir.is_dir() {
-            println!("No input corpus for {fuzz_target} (ignoring)");
-            continue;
+    for git_ref in &git_refs {
+        println!("Adding reduced seeds with afl-cmin on {git_ref}");
+        build_bitcoin_afl(git_ref)?;
+        let fuzz_targets = get_fuzz_targets()?;
+        for fuzz_target in &fuzz_targets {
+            let input_dir = all_inputs_dir.join(fuzz_target);
+            if !input_dir.is_dir() {
+                println!("No input corpus for {fuzz_target} (ignoring)");
+                continue;
+            }
+            // afl-cmin needs an empty output directory, unlike libFuzzer
+            let output_dir = fuzz_corpora_dir_path.join(fuzz_target).join(git_ref);
+            run_afl_cmin(fuzz_target, input_dir, &output_dir)?;
+            move_files_to_parent_dir(&output_dir)?;
         }
-        let output_dir = fuzz_corpora_dir_path.join(fuzz_target);
-        run_afl_cmin(fuzz_target, input_dir, output_dir)?;
-    }
-    git_add(QA_ASSETS_PATH, FUZZ_CORPORA_DIR)?;
-    git_commit(QA_ASSETS_PATH, "Reduced inputs for afl-cmin")?;
 
-    for sanitizer in SANITIZERS {
-        println!("Adding reduced seeds for sanitizer={sanitizer}");
-        build_bitcoin_with_sanitizer(sanitizer)?;
-        run_libfuzzer(&all_inputs_dir, &fuzz_corpora_dir_path)?;
         git_add(QA_ASSETS_PATH, FUZZ_CORPORA_DIR)?;
-        git_commit(QA_ASSETS_PATH, &format!("Reduced inputs for {sanitizer}"))?;
+        git_commit(
+            QA_ASSETS_PATH,
+            &format!("Reduced inputs for afl-cmin on {git_ref}"),
+        )?;
+    }
+
+    for git_ref in &git_refs {
+        for sanitizer in SANITIZERS {
+            println!("Adding reduced seeds for {sanitizer} on {git_ref}");
+            build_bitcoin_with_sanitizer(git_ref, sanitizer)?;
+            run_libfuzzer(&all_inputs_dir, &fuzz_corpora_dir_path)?;
+            git_add(QA_ASSETS_PATH, FUZZ_CORPORA_DIR)?;
+            git_commit(
+                QA_ASSETS_PATH,
+                &format!("Reduced inputs for {sanitizer} on {git_ref}"),
+            )?;
+        }
     }
 
     println!("✨ Saved minimized fuzz corpora. ✨");
@@ -291,7 +321,7 @@ fn git_add<P: AsRef<Path>, Q: AsRef<Path>>(repo_path: P, file_path: Q) -> AppRes
 fn git_commit<P: AsRef<Path>>(repo_path: P, message: &str) -> AppResult {
     if !Command::new("git")
         .current_dir(repo_path)
-        .args(["commit", "-m", message])
+        .args(["commit", "--allow-empty", "-m", message])
         .status()
         .map_err(|e| format!("failed to spawn git commit: {e}"))?
         .success()
@@ -302,24 +332,69 @@ fn git_commit<P: AsRef<Path>>(repo_path: P, message: &str) -> AppResult {
     Ok(())
 }
 
-fn build_bitcoin_afl() -> AppResult {
-    build_bitcoin(&[
-        "-DCMAKE_C_COMPILER=afl-clang-fast",
-        "-DCMAKE_CXX_COMPILER=afl-clang-fast++",
-        "-DBUILD_FOR_FUZZING=ON",
-    ])
+fn git_ls_remote(remote: &str, git_ref: &str) -> AppResult {
+    if !Command::new("git")
+        .args(["ls-remote", "--exit-code", remote, git_ref])
+        .status()
+        .map_err(|e| format!("failed to spawn git ls-remote: {e}"))?
+        .success()
+    {
+        return Err(format!("git ls-remote: {git_ref} not found"));
+    }
+
+    Ok(())
 }
 
-fn build_bitcoin_with_sanitizer(sanitizer: &str) -> AppResult {
-    build_bitcoin(&[
-        &format!("-DCMAKE_C_COMPILER=clang-{LLVM_VERSION}"),
-        &format!("-DCMAKE_CXX_COMPILER=clang++-{LLVM_VERSION}"),
-        "-DBUILD_FOR_FUZZING=ON",
-        &format!("-DSANITIZERS={sanitizer}"),
-    ])
+fn build_bitcoin_afl(git_ref: &str) -> AppResult {
+    build_bitcoin(
+        git_ref,
+        &[
+            "-DCMAKE_C_COMPILER=afl-clang-fast",
+            "-DCMAKE_CXX_COMPILER=afl-clang-fast++",
+            "-DBUILD_FOR_FUZZING=ON",
+        ],
+    )
 }
 
-fn build_bitcoin(cmake_args: &[&str]) -> AppResult {
+fn build_bitcoin_with_sanitizer(git_ref: &str, sanitizer: &str) -> AppResult {
+    build_bitcoin(
+        git_ref,
+        &[
+            &format!("-DCMAKE_C_COMPILER=clang-{LLVM_VERSION}"),
+            &format!("-DCMAKE_CXX_COMPILER=clang++-{LLVM_VERSION}"),
+            "-DBUILD_FOR_FUZZING=ON",
+            &format!("-DSANITIZERS={sanitizer}"),
+        ],
+    )
+}
+
+fn build_bitcoin(git_ref: &str, cmake_args: &[&str]) -> AppResult {
+    if !Command::new("git")
+        .current_dir(BITCOIN_PATH)
+        .args([
+            "fetch",
+            "--depth=1",
+            "--refmap=refs/tags/*:refs/tags/*",
+            "origin",
+            git_ref,
+        ])
+        .status()
+        .map_err(|e| format!("failed to spawn git fetch: {e}"))?
+        .success()
+    {
+        return Err(format!("git fetch {git_ref} failed"));
+    }
+
+    if !Command::new("git")
+        .current_dir(BITCOIN_PATH)
+        .args(["checkout", git_ref])
+        .status()
+        .map_err(|e| format!("failed to spawn git checkout: {e}"))?
+        .success()
+    {
+        return Err(format!("git checkout {git_ref} failed"));
+    }
+
     let build_dir = Path::new(BITCOIN_PATH).join(BITCOIN_BUILD_DIR);
     if build_dir.exists() {
         fs::remove_dir_all(&build_dir)
@@ -404,6 +479,32 @@ fn run_afl_cmin<P: AsRef<Path>, Q: AsRef<Path>>(
     {
         return Err(format!("afl-cmin failed for {fuzz_target}"));
     }
+    Ok(())
+}
+
+/// Move every file in `dir` to its parent directory.
+fn move_files_to_parent_dir(dir: &PathBuf) -> AppResult {
+    let names: Vec<_> = fs::read_dir(dir)
+        .map_err(|e| format!("fs::read_dir failed: {}", e.to_string()))?
+        .map(|e| e.map(|e| e.file_name()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("failed to read entry: {}", e.to_string()))?;
+
+    let parent = dir
+        .parent()
+        .ok_or_else(|| format!("expected {} to have parent", dir.display()))?;
+
+    for name in names {
+        let from = dir.join(&name);
+        let to = parent.join(&name);
+        fs::rename(&from, &to).map_err(|e| format!("fs::rename failed: {}", e.to_string()))?;
+    }
+
+    // We don't use fs::remove_dir here because dir might not be empty. afl-cmin
+    // creates hard links; when source and destination are the same inode,
+    // fs::rename succeeds as a no-op and dir can still contain entries.
+    fs::remove_dir_all(dir).map_err(|e| format!("fs::remove_dir_all failed: {}", e.to_string()))?;
+
     Ok(())
 }
 
