@@ -48,7 +48,7 @@ const BITCOIN_PATH: &str = "bitcoin";
 /// Bitcoin build directory.
 const BITCOIN_BUILD_DIR: &str = "build_fuzz";
 
-const LLVM_VERSION: &str = "18";
+const LLVM_VERSION: &str = "20";
 const SANITIZERS: &[&str] = &["fuzzer", "fuzzer,address,undefined,integer"];
 
 fn help(err: &str) -> AppError {
